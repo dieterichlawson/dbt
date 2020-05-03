@@ -18,6 +18,7 @@ import argparse
 import opt
 from quadrature import ghq
 import util
+from tb_logging import TensorboardLogger
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--num_points', type=int, default=5, 
@@ -29,6 +30,16 @@ parser.add_argument('--distance_threshold', type=float, default=2.,
 parser.add_argument('--distance_variance', type=float, default=0.1,
                     help='Variance of the noise added to distance observations.')
 
+parser.add_argument('--num_steps', type=int, default=100,
+                    help='Number of steps to run the VI algorithm for.')
+parser.add_argument('--num_newton_steps', type=int, default=20,
+                    help='Number of Newton steps used to find the mode.')
+parser.add_argument('--newton_lr', type=float, default=0.1,
+                    help='Learning rate to use with Newton\'s method.')
+
+parser.add_argument('--logdir', type=str, default='/tmp/dbt',
+                    help="Logging directory for Tensorboard summaries")
+                    
 def np_log_joint(X, S, D,
                  prior='uniform',
                  prior_var=1.,
@@ -363,22 +374,22 @@ def dbt_laplace(num_points, C, D,
 
 
 args = parser.parse_args()
-print(args)
 
 num_points = 3
 censorship_temp = 0.
 distance_var = 0.01
 distance_threshold = 5.
-X, C, D = sample(num_points,
-                 censorship_temp=censorship_temp,
-                 distance_var=distance_var,
-                 distance_threshold=distance_threshold)
+X, C, D = sample(args.num_points,
+                 censorship_temp=args.censorship_temp,
+                 distance_var=args.distance_variance,
+                 distance_threshold=args.distance_threshold)
 
 #plot_problem(X, C, D, censorship_temp=censorship_temp, distance_var=distance_var, distance_threshold=distance_threshold)
+logger = TensorboardLogger(args.logdir)
 
-dbt_laplace(num_points, C, D,
-            censorship_temp=censorship_temp,
-            distance_var=distance_var,
-            distance_threshold=distance_threshold,
-            num_steps=25,
-            num_newton_steps=50, newton_lr=0.05)
+dbt_laplace(args.num_points, C, D,
+            censorship_temp=args.censorship_temp,
+            distance_var=args.distance_variance,
+            distance_threshold=args.distance_threshold,
+            num_steps=args.num_steps,
+            num_newton_steps=args.num_newton_steps, newton_lr=args.newton_lr)
