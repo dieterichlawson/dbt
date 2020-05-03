@@ -19,6 +19,7 @@ import opt
 from quadrature import ghq
 import util
 from tb_logging import TensorboardLogger
+from plot import plot_objective_and_iterates, plot_truth_and_posterior
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--num_points', type=int, default=5, 
@@ -316,7 +317,8 @@ def dbt_laplace(num_points, C, D,
                 distance_var=0.1,
                 num_steps=1000,
                 num_newton_steps=25,
-                newton_lr=0.05):
+                newton_lr=0.05,
+                logger=None):
   # initialize q parameters
   if init_mus is None:
     mus = onp.random.normal(size=(num_points,2))
@@ -354,10 +356,15 @@ def dbt_laplace(num_points, C, D,
         integrator=functools.partial(ghq, degree=3))
 
   for t in range(num_steps):
+
+    if logger is not None:
+      logger.log_images("truth_vs_posterior_mean", plot_truth_and_posterior(X, mus, C), t)
+
     for i in range(num_points):
       # Use newton's method to find the mode
       quad_loc = onp.concatenate([mus[:i], mus[i+1:]], axis=0).reshape([(num_points-1)*2])
       quad_cov = scipy.linalg.block_diag(*[covs[j] for j in range(num_points) if j != i])
+
       xs, fs = opt._newtons_method(lambda x: elj(x, i, quad_loc, quad_cov),
                                    lambda x: grad_elj(x, i, quad_loc, quad_cov),
                                    lambda x: hess_elj(x, i, quad_loc, quad_cov),
@@ -365,26 +372,26 @@ def dbt_laplace(num_points, C, D,
       # update mu and Sigma
       new_mu_i = xs[-1]
       new_cov_i = -onp.linalg.inv(hess_elj(new_mu_i, i, quad_loc, quad_cov))
-      print(new_cov_i)
-      print(onp.linalg.eig(new_cov_i)[0])
-      mus = onp.concatenate([mus[:i], [new_mu_i], mus[i+1:]], axis=0)
+      new_mus = onp.concatenate([mus[:i], [new_mu_i], mus[i+1:]], axis=0)
       covs = onp.concatenate([covs[:i], [new_cov_i], covs[i+1:]], axis=0)
+
+      if logger is not None:
+        logger.log_images("objective/%d" % i,
+                plot_objective_and_iterates(mus, xs, C, i, 
+                    lambda x:np.exp(elj(x, i, quad_loc, quad_cov))),
+                t)
+      mus = new_mus
+
 
   return mus, covs
 
-
 args = parser.parse_args()
 
-num_points = 3
-censorship_temp = 0.
-distance_var = 0.01
-distance_threshold = 5.
 X, C, D = sample(args.num_points,
                  censorship_temp=args.censorship_temp,
                  distance_var=args.distance_variance,
                  distance_threshold=args.distance_threshold)
 
-#plot_problem(X, C, D, censorship_temp=censorship_temp, distance_var=distance_var, distance_threshold=distance_threshold)
 logger = TensorboardLogger(args.logdir)
 
 dbt_laplace(args.num_points, C, D,
@@ -392,4 +399,5 @@ dbt_laplace(args.num_points, C, D,
             distance_var=args.distance_variance,
             distance_threshold=args.distance_threshold,
             num_steps=args.num_steps,
-            num_newton_steps=args.num_newton_steps, newton_lr=args.newton_lr)
+            num_newton_steps=args.num_newton_steps, newton_lr=args.newton_lr,
+            logger=logger)

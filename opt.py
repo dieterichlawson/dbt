@@ -15,7 +15,7 @@ def _newtons_method(f, grad_f, hess_f, lr, num_steps, init_x):
   ddir = jit(ddir)
   for t in range(num_steps):
     descent_dir = ddir(x)
-    x = x - lr*descent_dir
+    x = x + lr*descent_dir
     fs.append(f(x))
     xs.append(x)
   return np.array(xs), np.array(fs)
