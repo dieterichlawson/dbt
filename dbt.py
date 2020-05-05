@@ -30,13 +30,19 @@ parser.add_argument('--distance_threshold', type=float, default=2.,
                     help='Distance threshold at which the probability of censorship is %50.')
 parser.add_argument('--distance_variance', type=float, default=0.1,
                     help='Variance of the noise added to distance observations.')
+parser.add_argument('--prior', type=str, default='gaussian',
+                    choices=['gaussian', 'uniform'],
+                    help='Type of prior for the locations.')
 
 parser.add_argument('--num_steps', type=int, default=100,
                     help='Number of steps to run the VI algorithm for.')
-parser.add_argument('--num_newton_steps', type=int, default=20,
-                    help='Number of Newton steps used to find the mode.')
-parser.add_argument('--newton_lr', type=float, default=0.1,
-                    help='Learning rate to use with Newton\'s method.')
+parser.add_argument('--num_inner_opt_steps', type=int, default=20,
+                    help='Number of optimization steps used to find the mode.')
+parser.add_argument('--opt_method', type=str, default='grad_descent',
+                     choices=['newton', 'grad_descent', 'grad_descent_momentum'],
+                     help='Optimization method.')
+parser.add_argument('--lr', type=float, default=0.1,
+                    help='Learning rate to use with the optimization method.')
 
 parser.add_argument('--logdir', type=str, default='/tmp/dbt',
                     help="Logging directory for Tensorboard summaries")
@@ -106,7 +112,7 @@ def log_joint(X, C, D,
     log_p: The log probability of the provided observations.
   """
   if prior == "gaussian":
-    prior = np.sum(scipy.stats.norm.logpdf(X, mean=[0.,0.], cov=prior_var))
+    prior = np.sum(scipy.stats.multivariate_normal.logpdf(X, mean=np.array([0.,0.]), cov=prior_var))
   elif prior == "uniform":
     prior = 0.
   distances = util.jax_l2_pdist(X)
@@ -193,7 +199,7 @@ def expected_log_joint(x, i, C, D, num_points,
   def f(cond_x):
     cond_x = cond_x.reshape([num_points-1, 2])
     real_x = np.concatenate((cond_x[:i], x[np.newaxis,:], cond_x[i:]))
-    return log_joint(real_x, C, D, 
+    return -log_joint(real_x, C, D, 
                      prior=prior, 
                      prior_var=prior_var, 
                      censorship_temp=censorship_temp, 
@@ -244,7 +250,7 @@ def grad_expected_log_joint(x, i, C, D, num_points,
   def f(x_i, x_other):
     x_other = x_other.reshape([num_points-1, 2])
     real_x = np.concatenate((x_other[:i], x_i[np.newaxis,:], x_other[i:]))
-    return log_joint(real_x, C, D, 
+    return -log_joint(real_x, C, D, 
                      prior=prior, 
                      prior_var=prior_var, 
                      censorship_temp=censorship_temp, 
@@ -297,7 +303,7 @@ def hess_expected_log_joint(x, i, C, D, num_points,
   def f(x_i, x_other):
     x_other = x_other.reshape([num_points-1, 2])
     real_x = np.concatenate((x_other[:i], x_i[np.newaxis,:], x_other[i:]))
-    return log_joint(real_x, C, D, 
+    return -log_joint(real_x, C, D, 
                      prior=prior, 
                      prior_var=prior_var, 
                      censorship_temp=censorship_temp, 
@@ -315,9 +321,10 @@ def dbt_laplace(num_points, C, D,
                 censorship_temp=10,
                 distance_threshold=.5,
                 distance_var=0.1,
-                num_steps=1000,
-                num_newton_steps=25,
-                newton_lr=0.05,
+                opt_method='grad_descent_momentum',
+                num_outer_steps=100,
+                num_inner_steps=100,
+                lr=0.05,
                 logger=None):
   # initialize q parameters
   if init_mus is None:
@@ -355,7 +362,7 @@ def dbt_laplace(num_points, C, D,
         distance_var=distance_var,
         integrator=functools.partial(ghq, degree=3))
 
-  for t in range(num_steps):
+  for t in range(num_outer_steps):
 
     if logger is not None:
       logger.log_images("truth_vs_posterior_mean", plot_truth_and_posterior(X, mus, C), t)
@@ -364,21 +371,34 @@ def dbt_laplace(num_points, C, D,
       # Use newton's method to find the mode
       quad_loc = onp.concatenate([mus[:i], mus[i+1:]], axis=0).reshape([(num_points-1)*2])
       quad_cov = scipy.linalg.block_diag(*[covs[j] for j in range(num_points) if j != i])
+      
+      if opt_method == 'newton':
+        xs, fs = opt.newtons_method(lambda x: elj(x, i, quad_loc, quad_cov),
+                                    lambda x: grad_elj(x, i, quad_loc, quad_cov),
+                                    lambda x: hess_elj(x, i, quad_loc, quad_cov),
+                                    mus[i], num_steps=num_inner_steps)
+      elif opt_method == 'grad_descent':
+        xs, fs = opt.gradient_descent(lambda x: elj(x, i, quad_loc, quad_cov),
+                                      lambda x: grad_elj(x, i, quad_loc, quad_cov),
+                                      mus[i], lr, num_steps=num_inner_steps)
+      elif opt_method == 'grad_descent_momentum':
+        xs, fs = opt.gradient_descent_with_momentum(
+                lambda x: elj(x, i, quad_loc, quad_cov),
+                lambda x: grad_elj(x, i, quad_loc, quad_cov),
+                mus[i], lr, num_steps=num_inner_steps)
 
-      xs, fs = opt._newtons_method(lambda x: elj(x, i, quad_loc, quad_cov),
-                                   lambda x: grad_elj(x, i, quad_loc, quad_cov),
-                                   lambda x: hess_elj(x, i, quad_loc, quad_cov),
-                                   newton_lr, num_newton_steps, mus[i])
+      print("xs:", xs)
+      print("fs:", fs)
       # update mu and Sigma
       new_mu_i = xs[-1]
-      new_cov_i = -onp.linalg.inv(hess_elj(new_mu_i, i, quad_loc, quad_cov))
+      new_cov_i = -onp.linalg.inv(-hess_elj(new_mu_i, i, quad_loc, quad_cov))
       new_mus = onp.concatenate([mus[:i], [new_mu_i], mus[i+1:]], axis=0)
       covs = onp.concatenate([covs[:i], [new_cov_i], covs[i+1:]], axis=0)
 
       if logger is not None:
         logger.log_images("objective/%d" % i,
                 plot_objective_and_iterates(mus, xs, C, i, 
-                    lambda x:np.exp(elj(x, i, quad_loc, quad_cov))),
+                    lambda x:-elj(x, i, quad_loc, quad_cov)),
                 t)
       mus = new_mus
 
@@ -390,7 +410,8 @@ args = parser.parse_args()
 X, C, D = sample(args.num_points,
                  censorship_temp=args.censorship_temp,
                  distance_var=args.distance_variance,
-                 distance_threshold=args.distance_threshold)
+                 distance_threshold=args.distance_threshold,
+                 prior='gaussian')
 
 logger = TensorboardLogger(args.logdir)
 
@@ -398,6 +419,9 @@ dbt_laplace(args.num_points, C, D,
             censorship_temp=args.censorship_temp,
             distance_var=args.distance_variance,
             distance_threshold=args.distance_threshold,
-            num_steps=args.num_steps,
-            num_newton_steps=args.num_newton_steps, newton_lr=args.newton_lr,
-            logger=logger)
+            opt_method=args.opt_method,
+            num_outer_steps=args.num_steps,
+            num_inner_steps=args.num_inner_opt_steps, 
+            lr=args.lr,
+            logger=logger,
+            prior=args.prior)
