@@ -44,3 +44,21 @@ def gradient_descent_with_momentum(f, grad_f, init_x, lr, num_steps=25, alpha=0.
     xs.append(x)
     prev_ddir = ddir
   return np.array(xs), np.array(fs)
+
+def adam(f, grad_f, init_x, lr, num_steps=25, beta_1=0.9, beta_2=0.999, epsilon=1e-8):
+  first_moment = np.zeros_like(init_x)
+  second_moment = np.zeros_like(init_x)
+  x = init_x
+  xs = [x]
+  fs = [f(x)]
+  for t in range(num_steps):
+    g = grad_f(x)
+    first_moment = beta_1*first_moment + (1 - beta_1)*g
+    second_moment = beta_2*second_moment + (1-beta_2)*(g**2)
+    true_first_moment = first_moment/(1. - np.power(beta_1, t+1))
+    true_second_moment = second_moment/(1. - np.power(beta_2, t+1))
+    x = x - lr*true_first_moment/(np.sqrt(true_second_moment) + epsilon)
+    xs.append(x)
+    fs.append(f(x))
+  return np.array(xs), np.array(fs)
+

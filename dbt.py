@@ -39,7 +39,7 @@ parser.add_argument('--num_steps', type=int, default=100,
 parser.add_argument('--num_inner_opt_steps', type=int, default=20,
                     help='Number of optimization steps used to find the mode.')
 parser.add_argument('--opt_method', type=str, default='grad_descent',
-                     choices=['newton', 'grad_descent', 'grad_descent_momentum'],
+                     choices=['newton', 'grad_descent', 'grad_descent_momentum', 'adam'],
                      help='Optimization method.')
 parser.add_argument('--lr', type=float, default=0.1,
                     help='Learning rate to use with the optimization method.')
@@ -386,6 +386,12 @@ def dbt_laplace(num_points, C, D,
                 lambda x: elj(x, i, quad_loc, quad_cov),
                 lambda x: grad_elj(x, i, quad_loc, quad_cov),
                 mus[i], lr, num_steps=num_inner_steps)
+      elif opt_method == 'adam':
+        xs, fs = opt.adam(
+                lambda x: elj(x, i, quad_loc, quad_cov),
+                lambda x: grad_elj(x, i, quad_loc, quad_cov),
+                mus[i], lr, num_steps=num_inner_steps)
+
 
       print("xs:", xs)
       print("fs:", fs)
