@@ -13,7 +13,6 @@ import matplotlib.pyplot as plt
 import functools
 import itertools
 
-
 def gauss_hermite_points_and_weights(locs, scales, degree=5):
   n = locs.shape[0]
   # [degree]
@@ -94,7 +93,6 @@ def mc_integrator(f, loc, cov, num_samples):
   f = jax.vmap(f, in_axes=0)
   sample_est = np.mean(f(xs), axis=0)
   return sample_est
-
 
 def integrate(f, points, weights):
   # [degree^2, ...]

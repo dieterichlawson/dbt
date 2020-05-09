@@ -8,6 +8,9 @@ import jax
 def plot_objective_and_iterates(Xs, iterates, C, k, objective, num_pts=100):
 
   num_points = Xs.shape[0]
+  has_nan_iterates = np.any(np.isnan(iterates))
+  it_inds = np.logical_not(np.any(np.isnan(iterates), axis=1))
+  iterates = iterates[it_inds,:]
 
   objective = jax.vmap(objective)
   all_Xs = np.concatenate([Xs, iterates], axis=0)  
@@ -30,6 +33,7 @@ def plot_objective_and_iterates(Xs, iterates, C, k, objective, num_pts=100):
   X, Y = np.meshgrid(x, y)
   XY = np.reshape(np.stack([X,Y], axis=-1), [num_pts**2, 2])
   density = np.reshape(objective(XY), [num_pts, num_pts])
+
   if np.any(np.isnan(density)) or np.any(np.isinf(density)):
     print("Density plot has nans")
 
@@ -46,7 +50,11 @@ def plot_objective_and_iterates(Xs, iterates, C, k, objective, num_pts=100):
     ax1.annotate(i, (Xs[i,0], Xs[i,1]), color='white')
 
   for i in range(iterates.shape[0]):
-    ax1.plot(iterates[i,0], iterates[i,1], 'o', color='crimson')
+    if i == iterates.shape[0]-1 and has_nan_iterates:
+      ax1.plot(iterates[i,0], iterates[i,1], '*', color='crimson')
+    else:
+      ax1.plot(iterates[i,0], iterates[i,1], 'o', color='crimson')
+
     if i > 0:
       plt.plot([iterates[i-1,0], iterates[i,0]], [iterates[i-1,1], iterates[i,1]], color='crimson')
 

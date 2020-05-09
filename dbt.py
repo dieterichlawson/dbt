@@ -12,6 +12,7 @@ import scipy as oscipy
 import matplotlib.pyplot as plt
 
 import functools
+from functools import partial
 import itertools
 import argparse
 
@@ -31,9 +32,6 @@ parser.add_argument('--distance_threshold', type=float, default=2.,
                     help='Distance threshold at which the probability of censorship is %50.')
 parser.add_argument('--distance_variance', type=float, default=0.1,
                     help='Variance of the noise added to distance observations.')
-parser.add_argument('--prior', type=str, default='gaussian',
-                    choices=['gaussian', 'uniform'],
-                    help='Type of prior for the locations.')
 
 parser.add_argument('--num_steps', type=int, default=100,
                     help='Number of steps to run the VI algorithm for.')
@@ -45,49 +43,13 @@ parser.add_argument('--opt_method', type=str, default=opt.ADAM,
 parser.add_argument('--lr', type=float, default=0.1,
                     help='Learning rate to use with the optimization method.')
 
+parser.add_argument('--make_plots', type=bool, default=False,
+                    help="If true, log plots to Tensorboard (expensive).")
 parser.add_argument('--logdir', type=str, default='/tmp/dbt',
                     help="Logging directory for Tensorboard summaries")
-                    
-def np_log_joint(X, S, D,
-                 prior='uniform',
-                 prior_var=1.,
-                 censorship_temp=10,
-                 distance_threshold=.5,
-                 distance_var=0.1):
-  """Computes the joint log probability for the latent position model using only numpy ops.
 
-  Args:
-    X: A 2D numpy array of floats of shape (num_pos, 2), the positions.
-    S: A 2D numpy array of 0s and 1s of length num_pos*(num_pos-1)/2. The
-      censorship indicators. If an element of S is 1 then the distance between
-      the corresponding positions was observed. If it is 0, then it was not
-      observed.
-    D: A 2D numpy array of floats of length num_pos*(num_pos-1)/2. The distances
-      between positions. Distances for censored position pairs are ignored.
-    prior: Either 'uniform' or 'gaussian', the form of the position prior.
-    prior_var: The variance for the position prior if it is Gaussian.
-    censorship_temp: The temperature of the sigmoid that defines the censorship
-      distribution, is multiplied by the covariates before they are exponentiated.
-    distance_threshold: The distance where the probability of censorship is 50%.
-    distance_var: The variance of the conditional distribution of distance given
-      the positions and censoring indicators.
-
-  Returns:
-    log_p: The log probability of the provided observations.
-  """
-  if prior == "gaussian":
-    prior = onp.sum(scipy.stats.multivariate_normal.logpdf(X, mean=[0.,0.], cov=prior_var))
-  elif prior == "uniform":
-    prior = 0.
-  distances = oscipy.spatial.distance.pdist(X)
-  censorship_probs = oscipy.special.expit(censorship_temp*(distances - distance_threshold))
-  log_p_C = onp.sum(oscipy.stats.bernoulli.logpmf(C, censorship_probs))
-  distance_logprobs = oscipy.stats.norm.logpdf(D, loc=distances, scale=onp.sqrt(distance_var))
-  log_p_D = onp.sum(distance_logprobs*(1-C))
-  return prior + log_p_C + log_p_D
-
+@partial(jit, static_argnums=(1,2))
 def log_joint(X, C, D,
-              prior='uniform',
               prior_var=1.,
               censorship_temp=10,
               distance_threshold=.5,
@@ -101,7 +63,6 @@ def log_joint(X, C, D,
       the corresponding positions was censored. If it is 0, then it was observed.
     D: A 2D numpy array of floats of length num_pos*(num_pos-1)/2. The distances
       between positions. Distances for censored position pairs are ignored.
-    prior: Either 'uniform' or 'gaussian', the form of the position prior.
     prior_var: The variance for the position prior if it is Gaussian.
     censorship_temp: The temperature of the sigmoid that defines the censorship
       distribution, is multiplied by the covariates before they are exponentiated.
@@ -112,10 +73,7 @@ def log_joint(X, C, D,
   Returns:
     log_p: The log probability of the provided observations.
   """
-  if prior == "gaussian":
-    prior = np.sum(scipy.stats.multivariate_normal.logpdf(X, mean=np.array([0.,0.]), cov=prior_var))
-  elif prior == "uniform":
-    prior = 0.
+  prior = np.sum(scipy.stats.multivariate_normal.logpdf(X, mean=np.array([0.,0.]), cov=prior_var))
   distances = util.jax_l2_pdist(X)
   censorship_probs = scipy.special.expit(censorship_temp*(distances - distance_threshold))
   log_p_S = np.sum(util.jax_bernoulli_logpmf(C, censorship_probs))
@@ -161,14 +119,14 @@ def sample(N,
 
 def dbt_laplace(num_points, C, D, opt_method,
                 init_mus=None,
-                prior='uniform',
                 prior_var=1.,
                 censorship_temp=10,
                 distance_threshold=.5,
                 distance_var=0.1,
                 num_outer_steps=100,
                 lr=0.05,
-                logger=None):
+                logger=None,
+                plot=False):
   # initialize q parameters
   if init_mus is None:
     mus = onp.random.normal(size=(num_points,2)).astype(onp.float32)
@@ -179,7 +137,6 @@ def dbt_laplace(num_points, C, D, opt_method,
   def lj(x, i, cond_x):
     real_x = np.concatenate((cond_x[:i], x[np.newaxis,:], cond_x[i:]))
     return -log_joint(real_x, C, D, 
-                     prior=prior, 
                      prior_var=prior_var, 
                      censorship_temp=censorship_temp, 
                      distance_threshold=distance_threshold, 
@@ -190,13 +147,14 @@ def dbt_laplace(num_points, C, D, opt_method,
   grad_lj = jax.grad(lj, argnums=0)
   batched_grad_lj = jit(vmap(grad_lj, in_axes=(None, None, 0)), static_argnums=(1,2))
 
-  hess_lj = jax.jacfwd(grad_lj)
+  hess_lj = jax.hessian(lj, argnums=0)
   batched_hess_lj = jit(vmap(hess_lj, in_axes=(None, None, 0)), static_argnums=(1,2))
 
   for t in range(num_outer_steps):
 
-    if logger is not None:
+    if plot and logger is not None:
       logger.log_images("truth_vs_posterior_mean", plot_truth_and_posterior(X, mus, C), t)
+
     print('Global step %d' % (t+1))
 
     for i in range(num_points):
@@ -220,18 +178,21 @@ def dbt_laplace(num_points, C, D, opt_method,
       # update mu and Sigma
       if np.any(np.isnan(xs)):
         print("new X is nan, discarding")
+        new_mus = mus
       else:
         new_mu_i = xs[-1]
-        new_cov_i = - np.linalg.inv(-expected_hess_lj(new_mu_i))
+        h = -expected_hess_lj(new_mu_i)
+        new_cov_i = - np.linalg.inv(h)
         new_L_i = np.linalg.cholesky(new_cov_i)
         new_mus = np.concatenate([mus[:i], new_mu_i[np.newaxis,:], mus[i+1:]], axis=0)
         Ls = np.concatenate([Ls[:i], new_L_i[np.newaxis,:], Ls[i+1:]], axis=0)
 
-        if logger is not None:
-          logger.log_images("objective/%d" % i,
-                  plot_objective_and_iterates(mus, xs, C, i, lambda x:-expected_lj(x)),
-                  t)
-        mus = new_mus
+      if plot and logger is not None:
+        logger.log_images("objective/%d" % i,
+                plot_objective_and_iterates(mus, xs, C, i, lambda x:-expected_lj(x)),
+                t)
+
+      mus = new_mus
 
   return mus, Ls
 
@@ -253,4 +214,4 @@ dbt_laplace(args.num_points, C, D,
             num_outer_steps=args.num_steps,
             lr=args.lr,
             logger=logger,
-            prior=args.prior)
+            plot=args.make_plots)
