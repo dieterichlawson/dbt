@@ -39,8 +39,8 @@ parser.add_argument('--num_steps', type=int, default=100,
                     help='Number of steps to run the VI algorithm for.')
 parser.add_argument('--num_inner_opt_steps', type=int, default=20,
                     help='Number of optimization steps used to find the mode.')
-parser.add_argument('--opt_method', type=str, default='adam',
-                     choices=['newton', 'grad_descent', 'grad_descent_momentum', 'adam'],
+parser.add_argument('--opt_method', type=str, default=opt.ADAM,
+                     choices=opt.OPT_METHODS,
                      help='Optimization method.')
 parser.add_argument('--lr', type=float, default=0.1,
                     help='Learning rate to use with the optimization method.')
@@ -159,16 +159,14 @@ def sample(N,
   D = uncensored_D*(1-C)
   return X, C, D
 
-def dbt_laplace(num_points, C, D,
+def dbt_laplace(num_points, C, D, opt_method,
                 init_mus=None,
                 prior='uniform',
                 prior_var=1.,
                 censorship_temp=10,
                 distance_threshold=.5,
                 distance_var=0.1,
-                opt_method='grad_descent_momentum',
                 num_outer_steps=100,
-                num_inner_steps=100,
                 lr=0.05,
                 logger=None):
   # initialize q parameters
@@ -217,23 +215,8 @@ def dbt_laplace(num_points, C, D,
       def expected_hess_lj(x):
         return quadrature.integrate(lambda cond_x: batched_hess_lj(x, i, cond_x), pts, weights)
 
-      if opt_method == 'newton':
-        xs = opt.newtons_method(
-                expected_lj, expected_grad_lj, expected_hess_lj,
-                mus[i], num_steps=num_inner_steps)
-      elif opt_method == 'grad_descent':
-        xs = opt.gradient_descent(
-                expected_lj, expected_grad_lj,
-                mus[i], lr, num_steps=num_inner_steps)
-      elif opt_method == 'grad_descent_momentum':
-        xs = opt.gradient_descent_with_momentum(
-                expected_lj, expected_grad_lj,
-                mus[i], lr, num_steps=num_inner_steps)
-      elif opt_method == 'adam':
-        xs = opt.adam(
-                expected_lj, expected_grad_lj,
-                mus[i], lr, num_steps=num_inner_steps)
-
+      xs = opt_method(expected_lj, expected_grad_lj, expected_hess_lj, mus[i])
+                
       # update mu and Sigma
       if np.any(np.isnan(xs)):
         print("new X is nan, discarding")
@@ -263,12 +246,11 @@ X, C, D = sample(args.num_points,
 logger = TensorboardLogger(args.logdir)
 
 dbt_laplace(args.num_points, C, D,
+            opt_method=opt.get_opt_method(args.opt_method, args.num_inner_opt_steps, lr=args.lr),
             censorship_temp=args.censorship_temp,
             distance_var=args.distance_variance,
             distance_threshold=args.distance_threshold,
-            opt_method=args.opt_method,
             num_outer_steps=args.num_steps,
-            num_inner_steps=args.num_inner_opt_steps, 
             lr=args.lr,
             logger=logger,
             prior=args.prior)

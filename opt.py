@@ -2,7 +2,6 @@ import jax
 import jax.numpy as np
 from jax import jit
 
-import numpy as onp
 
 def newtons_method(f, grad_f, hess_f, init_x, alpha=0.5, beta=0.5, num_steps=25):
   x = init_x
@@ -54,3 +53,27 @@ def adam(f, grad_f, init_x, lr, num_steps=25, beta_1=0.9, beta_2=0.999, epsilon=
     xs.append(x)
   return np.array(xs)
 
+NEWTONS_METHOD="newtons"
+GRADIENT_DESCENT="grad_descent"
+GRADIENT_DESCENT_WITH_MOMENTUM="grad_descent_momentum"
+ADAM="adam"
+
+OPT_METHODS = [NEWTONS_METHOD, GRADIENT_DESCENT, GRADIENT_DESCENT_WITH_MOMENTUM, ADAM]
+
+OPT_FNS = {NEWTONS_METHOD: newtons_method,
+           GRADIENT_DESCENT: gradient_descent,
+           GRADIENT_DESCENT_WITH_MOMENTUM: gradient_descent_with_momentum,
+           ADAM: adam}
+
+def get_opt_method(opt_method, num_steps, lr=None):
+  assert opt_method in OPT_METHODS
+  if opt_method == NEWTONS_METHOD:
+    def fn(f, grad_f, hess_f, init_x):
+      return newtons_method(f, grad_f, hess_f, init_x, num_steps=num_steps)
+  elif (opt_method == "grad_descent" or
+        opt_method == "grad_descent_momentum" or
+        opt_method == "adam"):
+    opt_fn = OPT_FNS[opt_method]
+    def fn(f, grad_f, unused_hess_f, init_x):
+      return opt_fn(f, grad_f, init_x, lr=lr, num_steps=num_steps)
+  return fn
