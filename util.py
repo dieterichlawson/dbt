@@ -47,17 +47,9 @@ def jax_l2_pdist(X):
     dm: The pairwise distances between points in X, as a flattened 
       upper-triangular matrix.
   """
-  s = X.shape
-  if len(s) != 2:
-    raise ValueError('A 2-dimensional array must be passed.')
-  m, n = s
-  dm = []
-  k = 0
-  for i in range(0, m - 1):
-    for j in range(i + 1, m):
-      dm.append(np.linalg.norm(X[i]-X[j]))
-      k = k + 1
-  return np.array(dm)
+  n = X.shape[0]
+  diffs = (X[:, None] - X[None, :])[np.triu_indices(n=n, k=1)]
+  return np.linalg.norm(diffs, axis=1)
 
 def jax_bernoulli_logpmf(x, p):
   """Computes the log pmf of a Bernoulli random variable with parameter p.

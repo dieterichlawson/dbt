@@ -4,7 +4,7 @@ import jax.lax
 import jax.random
 import jax.numpy as np
 import jax.scipy as scipy
-from jax import jit, grad
+from jax import jit, grad, vmap
 
 import numpy as onp
 import scipy as oscipy
@@ -16,6 +16,7 @@ import itertools
 import argparse
 
 import opt
+import quadrature
 from quadrature import ghq
 import util
 from tb_logging import TensorboardLogger
@@ -38,7 +39,7 @@ parser.add_argument('--num_steps', type=int, default=100,
                     help='Number of steps to run the VI algorithm for.')
 parser.add_argument('--num_inner_opt_steps', type=int, default=20,
                     help='Number of optimization steps used to find the mode.')
-parser.add_argument('--opt_method', type=str, default='grad_descent',
+parser.add_argument('--opt_method', type=str, default='adam',
                      choices=['newton', 'grad_descent', 'grad_descent_momentum', 'adam'],
                      help='Optimization method.')
 parser.add_argument('--lr', type=float, default=0.1,
@@ -158,162 +159,6 @@ def sample(N,
   D = uncensored_D*(1-C)
   return X, C, D
 
-def expected_log_joint(x, i, C, D, num_points,
-                       quad_loc=None,
-                       quad_cov=None,
-                       prior='uniform',
-                       prior_var=1.,
-                       censorship_temp=10,
-                       distance_threshold=.5,
-                       distance_var=0.1,
-                       integrator=None):
-  """Computes E_{q(x_{not i})}[log p(X,D,C)].
-  
-  Args:
-    x: A 1-D numpy array of floats of shape [2]. The location to evaluate.
-    i: The index of the location to evaluate, must be in [0, num_points]
-    C: A 2D numpy array of 0s and 1s of length num_pos*(num_pos-1)/2. The
-      censorship indicators. If an element of C is 1 then the distance between
-      the corresponding positions was censored. If it is 0, then it was observed.
-    D: A 2D numpy array of floats of length num_pos*(num_pos-1)/2. The distances
-      between positions. Distances for censored position pairs are ignored.
-    num_points: The total number of location.
-    prior: Either 'uniform' or 'gaussian', the form of the position prior.
-    prior_var: The variance for the position prior if it is Gaussian.
-    censorship_temp: The temperature of the sigmoid that defines the censorship 
-      distribution, is multiplied by the covariates before they are exponentiated.
-    distance_threshold: The distance where the probability of censorship is 50%.
-    distance_var: The variance of the conditional distribution of distance given
-      the positions and censoring indicators.
-      
-  Returns:
-    log_p: The log probability of the provided observations.
-  """
-  if integrator is None:
-    integrator = functools.partial(ghq, degree=5)
-  if quad_loc is None:
-    quad_loc = np.zeros([(num_points-1)*2])
-  if quad_cov is None:
-    quad_cov = np.eye((num_points-1)*2)
-
-  def f(cond_x):
-    cond_x = cond_x.reshape([num_points-1, 2])
-    real_x = np.concatenate((cond_x[:i], x[np.newaxis,:], cond_x[i:]))
-    return -log_joint(real_x, C, D, 
-                     prior=prior, 
-                     prior_var=prior_var, 
-                     censorship_temp=censorship_temp, 
-                     distance_threshold=distance_threshold, 
-                     distance_var=distance_var)
-  f = jit(f)
-  return integrator(f, quad_loc, quad_cov)
-
-def grad_expected_log_joint(x, i, C, D, num_points,
-                            quad_loc=None,
-                            quad_cov=None,
-                            prior='uniform',
-                            prior_var=1.,
-                            censorship_temp=10,
-                            distance_threshold=.5,
-                            distance_var=0.1,
-                            integrator=None):
-  """Computes grad w.r.t. x_i of E_{q(x_{not i})}[log p(X,D,C)].
-  
-  Args:
-    x: A 1-D numpy array of floats of shape [2]. The location to evaluate.
-    i: The index of the location to evaluate, must be in [0, num_points]
-    C: A 2D numpy array of 0s and 1s of length num_pos*(num_pos-1)/2. The
-      censorship indicators. If an element of C is 1 then the distance between
-      the corresponding positions was censored. If it is 0, then it was observed.
-    D: A 2D numpy array of floats of length num_pos*(num_pos-1)/2. The distances
-      between positions. Distances for censored position pairs are ignored.
-    num_points: The total number of location.
-    prior: Either 'uniform' or 'gaussian', the form of the position prior.
-    prior_var: The variance for the position prior if it is Gaussian.
-    censorship_temp: The temperature of the sigmoid that defines the censorship 
-      distribution, is multiplied by the covariates before they are exponentiated.
-    distance_threshold: The distance where the probability of censorship is 50%.
-    distance_var: The variance of the conditional distribution of distance given
-      the positions and censoring indicators.
-      
-  Returns:
-    log_p: The log probability of the provided observations.
-  """
-  if integrator is None:
-    integrator = functools.partial(ghq, degree=5)
-
-  if quad_loc is None:
-    quad_loc = np.zeros([(num_points-1)*2])
-  if quad_cov is None:
-    quad_cov = np.eye((num_points-1)*2)
-  
-  def f(x_i, x_other):
-    x_other = x_other.reshape([num_points-1, 2])
-    real_x = np.concatenate((x_other[:i], x_i[np.newaxis,:], x_other[i:]))
-    return -log_joint(real_x, C, D, 
-                     prior=prior, 
-                     prior_var=prior_var, 
-                     censorship_temp=censorship_temp, 
-                     distance_threshold=distance_threshold, 
-                     distance_var=distance_var)
-
-  gradf = jit(grad(f, argnums=0))
-  gradf = functools.partial(gradf, x)
-  return integrator(gradf, quad_loc, quad_cov)
-
-def hess_expected_log_joint(x, i, C, D, num_points,
-                            quad_loc=None,
-                            quad_cov=None,
-                            prior='uniform',
-                            prior_var=1.,
-                            censorship_temp=10,
-                            distance_threshold=.5,
-                            distance_var=0.1,
-                            integrator=None):
-  """Computes grad^2 w.r.t. x_i of E_{q(x_{not i})}[log p(X,D,C)].
-  
-  Args:
-    x: A 1-D numpy array of floats of shape [2]. The location to evaluate.
-    i: The index of the location to evaluate, must be in [0, num_points]
-    C: A 2D numpy array of 0s and 1s of length num_pos*(num_pos-1)/2. The
-      censorship indicators. If an element of C is 1 then the distance between
-      the corresponding positions was censored. If it is 0, then it was observed.
-    D: A 2D numpy array of floats of length num_pos*(num_pos-1)/2. The distances
-      between positions. Distances for censored position pairs are ignored.
-    num_points: The total number of location.
-    prior: Either 'uniform' or 'gaussian', the form of the position prior.
-    prior_var: The variance for the position prior if it is Gaussian.
-    censorship_temp: The temperature of the sigmoid that defines the censorship 
-      distribution, is multiplied by the covariates before they are exponentiated.
-    distance_threshold: The distance where the probability of censorship is 50%.
-    distance_var: The variance of the conditional distribution of distance given
-      the positions and censoring indicators.
-      
-  Returns:
-    log_p: The log probability of the provided observations.
-  """
-  if integrator is None:
-    integrator = functools.partial(ghq, degree=5)
-
-  if quad_loc is None:
-    quad_loc = np.zeros([(num_points-1)*2])
-  if quad_cov is None:
-    quad_cov = np.eye((num_points-1)*2)
-  
-  def f(x_i, x_other):
-    x_other = x_other.reshape([num_points-1, 2])
-    real_x = np.concatenate((x_other[:i], x_i[np.newaxis,:], x_other[i:]))
-    return -log_joint(real_x, C, D, 
-                     prior=prior, 
-                     prior_var=prior_var, 
-                     censorship_temp=censorship_temp, 
-                     distance_threshold=distance_threshold, 
-                     distance_var=distance_var)
-
-  hessf = jit(jax.hessian(f, argnums=0))
-  hessf = functools.partial(hessf, x)
-  return integrator(hessf, quad_loc, quad_cov)
-
 def dbt_laplace(num_points, C, D,
                 init_mus=None,
                 prior='uniform',
@@ -328,88 +173,84 @@ def dbt_laplace(num_points, C, D,
                 logger=None):
   # initialize q parameters
   if init_mus is None:
-    mus = onp.random.normal(size=(num_points,2))
-  covs = np.array([np.eye(2)]*num_points)
+    mus = onp.random.normal(size=(num_points,2)).astype(onp.float32)
+
+  Ls = np.array([np.eye(2)]*num_points)
 
   # set up function, grad, and hessian
-  def elj(x, i, quad_loc, quad_cov):
-    return expected_log_joint(
-        x, i, C, D, num_points,
-        quad_loc=quad_loc, quad_cov=quad_cov,
-        prior=prior, prior_var=prior_var,
-        censorship_temp=censorship_temp,
-        distance_threshold=distance_threshold,
-        distance_var=distance_var,
-        integrator=functools.partial(ghq, degree=3))
+  def lj(x, i, cond_x):
+    real_x = np.concatenate((cond_x[:i], x[np.newaxis,:], cond_x[i:]))
+    return -log_joint(real_x, C, D, 
+                     prior=prior, 
+                     prior_var=prior_var, 
+                     censorship_temp=censorship_temp, 
+                     distance_threshold=distance_threshold, 
+                     distance_var=distance_var)
 
-  def grad_elj(x, i, quad_loc, quad_cov):
-    return grad_expected_log_joint(
-        x, i, C, D, num_points,
-        quad_loc=quad_loc, quad_cov=quad_cov,
-        prior=prior, prior_var=prior_var,
-        censorship_temp=censorship_temp,
-        distance_threshold=distance_threshold,
-        distance_var=distance_var,
-        integrator=functools.partial(ghq, degree=3))
+  batched_lj = jit(vmap(lj, in_axes=(None, None, 0)), static_argnums=(1,2))
 
-  def hess_elj(x, i, quad_loc, quad_cov):
-    return hess_expected_log_joint(
-        x, i, C, D, num_points,
-        quad_loc=quad_loc, quad_cov=quad_cov,
-        prior=prior, prior_var=prior_var,
-        censorship_temp=censorship_temp,
-        distance_threshold=distance_threshold,
-        distance_var=distance_var,
-        integrator=functools.partial(ghq, degree=3))
+  grad_lj = jax.grad(lj, argnums=0)
+  batched_grad_lj = jit(vmap(grad_lj, in_axes=(None, None, 0)), static_argnums=(1,2))
+
+  hess_lj = jax.jacfwd(grad_lj)
+  batched_hess_lj = jit(vmap(hess_lj, in_axes=(None, None, 0)), static_argnums=(1,2))
 
   for t in range(num_outer_steps):
 
     if logger is not None:
       logger.log_images("truth_vs_posterior_mean", plot_truth_and_posterior(X, mus, C), t)
+    print('Global step %d' % (t+1))
 
     for i in range(num_points):
-      # Use newton's method to find the mode
-      quad_loc = onp.concatenate([mus[:i], mus[i+1:]], axis=0).reshape([(num_points-1)*2])
-      quad_cov = scipy.linalg.block_diag(*[covs[j] for j in range(num_points) if j != i])
-      
+      print('  Inner step %d' % (i+1))
+      quad_locs = np.concatenate([mus[:i], mus[i+1:]], axis=0)
+      quad_scales = np.concatenate([Ls[:i], Ls[i+1:]], axis=0)
+      pts, weights = quadrature.gauss_hermite_points_and_weights(
+              quad_locs, quad_scales, degree=5)
+
+      def expected_lj(x):
+        return quadrature.integrate(lambda cond_x: batched_lj(x, i, cond_x), pts, weights)
+
+      def expected_grad_lj(x):
+        return quadrature.integrate(lambda cond_x: batched_grad_lj(x, i, cond_x), pts, weights)
+
+      def expected_hess_lj(x):
+        return quadrature.integrate(lambda cond_x: batched_hess_lj(x, i, cond_x), pts, weights)
+
       if opt_method == 'newton':
-        xs, fs = opt.newtons_method(lambda x: elj(x, i, quad_loc, quad_cov),
-                                    lambda x: grad_elj(x, i, quad_loc, quad_cov),
-                                    lambda x: hess_elj(x, i, quad_loc, quad_cov),
-                                    mus[i], num_steps=num_inner_steps)
+        xs = opt.newtons_method(
+                expected_lj, expected_grad_lj, expected_hess_lj,
+                mus[i], num_steps=num_inner_steps)
       elif opt_method == 'grad_descent':
-        xs, fs = opt.gradient_descent(lambda x: elj(x, i, quad_loc, quad_cov),
-                                      lambda x: grad_elj(x, i, quad_loc, quad_cov),
-                                      mus[i], lr, num_steps=num_inner_steps)
+        xs = opt.gradient_descent(
+                expected_lj, expected_grad_lj,
+                mus[i], lr, num_steps=num_inner_steps)
       elif opt_method == 'grad_descent_momentum':
-        xs, fs = opt.gradient_descent_with_momentum(
-                lambda x: elj(x, i, quad_loc, quad_cov),
-                lambda x: grad_elj(x, i, quad_loc, quad_cov),
+        xs = opt.gradient_descent_with_momentum(
+                expected_lj, expected_grad_lj,
                 mus[i], lr, num_steps=num_inner_steps)
       elif opt_method == 'adam':
-        xs, fs = opt.adam(
-                lambda x: elj(x, i, quad_loc, quad_cov),
-                lambda x: grad_elj(x, i, quad_loc, quad_cov),
+        xs = opt.adam(
+                expected_lj, expected_grad_lj,
                 mus[i], lr, num_steps=num_inner_steps)
 
-
-      print("xs:", xs)
-      print("fs:", fs)
       # update mu and Sigma
-      new_mu_i = xs[-1]
-      new_cov_i = -onp.linalg.inv(-hess_elj(new_mu_i, i, quad_loc, quad_cov))
-      new_mus = onp.concatenate([mus[:i], [new_mu_i], mus[i+1:]], axis=0)
-      covs = onp.concatenate([covs[:i], [new_cov_i], covs[i+1:]], axis=0)
+      if np.any(np.isnan(xs)):
+        print("new X is nan, discarding")
+      else:
+        new_mu_i = xs[-1]
+        new_cov_i = - np.linalg.inv(-expected_hess_lj(new_mu_i))
+        new_L_i = np.linalg.cholesky(new_cov_i)
+        new_mus = np.concatenate([mus[:i], new_mu_i[np.newaxis,:], mus[i+1:]], axis=0)
+        Ls = np.concatenate([Ls[:i], new_L_i[np.newaxis,:], Ls[i+1:]], axis=0)
 
-      if logger is not None:
-        logger.log_images("objective/%d" % i,
-                plot_objective_and_iterates(mus, xs, C, i, 
-                    lambda x:-elj(x, i, quad_loc, quad_cov)),
-                t)
-      mus = new_mus
+        if logger is not None:
+          logger.log_images("objective/%d" % i,
+                  plot_objective_and_iterates(mus, xs, C, i, lambda x:-expected_lj(x)),
+                  t)
+        mus = new_mus
 
-
-  return mus, covs
+  return mus, Ls
 
 args = parser.parse_args()
 
