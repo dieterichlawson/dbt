@@ -142,6 +142,15 @@ def dbt_laplace(num_points, C, D, opt_method,
                      distance_threshold=distance_threshold, 
                      distance_var=distance_var)
 
+  def elbo(X, q_locs, q_scales):
+    log_p = log_joint(X, C, D,
+            prior_var=prior_var,
+            censorship_temp=censorship_temp,
+            distance_threshold=distance_threshold,
+            distance_var=distance_var)
+    log_q = util.batched_mv_normal_logpdf(X, q_locs, q_scales)
+    return log_p - np.sum(log_q)
+
   batched_lj = jit(vmap(lj, in_axes=(None, None, 0)), static_argnums=(1,2))
 
   grad_lj = jax.grad(lj, argnums=0)
@@ -157,12 +166,21 @@ def dbt_laplace(num_points, C, D, opt_method,
 
     print('Global step %d' % (t+1))
 
+    pts, weights = quadrature.gauss_hermite_points_and_weights(
+            mus, Ls, degree=10)
+    step_elbo = jax.jit(jax.vmap(lambda X: elbo(X, mus, Ls), in_axes=0))
+    elbo_val = quadrature.integrate(step_elbo, pts, weights)
+    print("Elbo: %0.4f" % elbo_val)
+
+    if logger is not None:
+      logger.log_scalar("elbo", float(elbo_val), t)
+
     for i in range(num_points):
       print('  Inner step %d' % (i+1))
       quad_locs = np.concatenate([mus[:i], mus[i+1:]], axis=0)
       quad_scales = np.concatenate([Ls[:i], Ls[i+1:]], axis=0)
       pts, weights = quadrature.gauss_hermite_points_and_weights(
-              quad_locs, quad_scales, degree=5)
+              quad_locs, quad_scales, degree=3)
 
       def expected_lj(x):
         return quadrature.integrate(lambda cond_x: batched_lj(x, i, cond_x), pts, weights)
@@ -176,8 +194,8 @@ def dbt_laplace(num_points, C, D, opt_method,
       xs = opt_method(expected_lj, expected_grad_lj, expected_hess_lj, mus[i])
                 
       # update mu and Sigma
-      if np.any(np.isnan(xs)):
-        print("new X is nan, discarding")
+      if np.any(np.isnan(xs[-1])):
+        print("  New X is nan, discarding")
         new_mus = mus
       else:
         new_mu_i = xs[-1]
