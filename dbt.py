@@ -21,7 +21,7 @@ import quadrature
 from quadrature import ghq
 import util
 from tb_logging import TensorboardLogger
-from plot import plot_objective_and_iterates, plot_truth_and_posterior
+from plot import plot_objective_and_iterates, plot_truth_and_posterior, plot_posterior
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--num_points', type=int, default=5, 
@@ -132,6 +132,7 @@ def dbt_laplace(num_points, C, D, opt_method,
     mus = onp.random.normal(size=(num_points,2)).astype(onp.float32)
 
   Ls = np.array([np.eye(2)]*num_points)
+  covs = np.array([np.eye(2)]*num_points)
 
   # set up function, grad, and hessian
   def lj(x, i, cond_x):
@@ -156,13 +157,13 @@ def dbt_laplace(num_points, C, D, opt_method,
   grad_lj = jax.grad(lj, argnums=0)
   batched_grad_lj = jit(vmap(grad_lj, in_axes=(None, None, 0)), static_argnums=(1,2))
 
-  hess_lj = jax.hessian(lj, argnums=0)
+  hess_lj = jax.jacfwd(grad_lj, argnums=0)
   batched_hess_lj = jit(vmap(hess_lj, in_axes=(None, None, 0)), static_argnums=(1,2))
 
   for t in range(num_outer_steps):
 
     if plot and logger is not None:
-      logger.log_images("truth_vs_posterior_mean", plot_truth_and_posterior(X, mus, C), t)
+      logger.log_images("truth_vs_posterior_mean", plot_truth_and_posterior(X, mus, C, covs), t)
 
     print('Global step %d' % (t+1))
 
@@ -199,11 +200,16 @@ def dbt_laplace(num_points, C, D, opt_method,
         new_mus = mus
       else:
         new_mu_i = xs[-1]
-        h = -expected_hess_lj(new_mu_i)
-        new_cov_i = - np.linalg.inv(h)
+        h = expected_hess_lj(new_mu_i)
+        new_cov_i = np.linalg.inv(h)
         new_L_i = np.linalg.cholesky(new_cov_i)
-        new_mus = np.concatenate([mus[:i], new_mu_i[np.newaxis,:], mus[i+1:]], axis=0)
-        Ls = np.concatenate([Ls[:i], new_L_i[np.newaxis,:], Ls[i+1:]], axis=0)
+        if np.any(np.isnan(new_L_i)) or np.any(np.diag(new_L_i) < 1e-4):
+          print("  Hessian at new x is not positive definite, discarding.")
+          new_mus = mus
+        else:
+          new_mus = np.concatenate([mus[:i], new_mu_i[np.newaxis,:], mus[i+1:]], axis=0)
+          Ls = np.concatenate([Ls[:i], new_L_i[np.newaxis,:], Ls[i+1:]], axis=0)
+          covs = np.concatenate([covs[:i], new_cov_i[np.newaxis,:], covs[i+1:]], axis=0)
 
       if plot and logger is not None:
         logger.log_images("objective/%d" % i,

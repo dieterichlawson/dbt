@@ -73,7 +73,7 @@ def jax_bernoulli_logpmf(x, p):
 
 @partial(jit)
 def jax_mv_normal_logpdf(X, loc, L):
-  cov = np.dot(L,L.T)
+  cov = np.dot(L, L.T)
   dim = X.shape[-1]
   eigvals, eigvecs = scipy.linalg.eigh(cov)
   eps = 1e-5*np.max(abs(eigvals))
@@ -83,7 +83,7 @@ def jax_mv_normal_logpdf(X, loc, L):
   log_nonzero_eigvals = np.where(mask, np.log(eigvals), np.zeros_like(eigvals))
   log_det = np.sum(log_nonzero_eigvals)
   dev = X - loc[np.newaxis,:]
-  maha = np.sum(np.square(np.dot(dev, cov)), axis=-1)
+  maha = np.sum(np.square(np.dot(dev, U)), axis=-1)
   return -0.5 * (dim * np.log(2 * np.pi) + log_det + maha)
 
 batched_mv_normal_logpdf = jax.jit(jax.vmap(jax_mv_normal_logpdf, in_axes=0))
