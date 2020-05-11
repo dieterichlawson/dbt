@@ -157,6 +157,13 @@ def confidence_ellipses(center, cov, ax, **kwargs):
 
 def plot_truth_and_posterior(gt_Xs, post_Xs, C, covs, num_pts=100):
   num_points = gt_Xs.shape[0]
+  centered_gt_Xs = gt_Xs - np.mean(gt_Xs, axis=0)
+  centered_post_Xs = post_Xs - np.mean(post_Xs, axis=0)
+  R, scale = scipy.linalg.orthogonal_procrustes(centered_post_Xs, centered_gt_Xs)
+  post_Xs = np.dot(centered_post_Xs, R)
+  covs = np.matmul(R.T[np.newaxis,:,:], np.matmul(covs, R[np.newaxis,:,:]))
+  gt_Xs = centered_gt_Xs
+
   gtb = window_for_points(gt_Xs)
   pb = window_for_points(post_Xs)
 
