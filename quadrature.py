@@ -3,7 +3,7 @@ import jax.lax
 import jax.random
 import jax.numpy as np
 import jax.scipy as scipy
-from jax import jit, grad
+from jax import jit, grad, vmap
 
 import numpy as onp
 import scipy as oscipy
@@ -11,7 +11,40 @@ import scipy as oscipy
 import matplotlib.pyplot as plt
 
 import functools
+from functools import partial
 import itertools
+
+def std_ghq_2d_separable(n, degree=5):
+  # [degree]
+  xs_1d, ws_1d = onp.polynomial.hermite.hermgauss(degree)
+  # [degree^2, 2]
+  xs_2d = onp.array(list(itertools.product(xs_1d, xs_1d)))
+  # [degree^2, n, 2]
+  xs_nd = onp.stack([xs_2d]*n, axis=1)
+  # [degree^2]
+  ws_2d = onp.prod(onp.array(list(itertools.product(ws_1d, ws_1d))), axis=1)
+  # [degree^2]
+  ws_nd = ws_2d / np.power(np.pi, (3/2.))
+  return xs_nd, ws_nd
+
+def integrate_std(f, points_and_weights):
+  points, weights = points_and_weights
+  # [degree^2, ...]
+  gs = f(points)
+  ws_shape = [gs.shape[0]] + [1]*(gs.ndim-1)
+  return np.sum(gs * weights.reshape(ws_shape), axis=0)
+
+@partial(jit)
+def transform_points(pts, loc, L):
+  return np.matmul(L[np.newaxis,...], pts[...,np.newaxis]).squeeze(-1) + loc[np.newaxis,:]
+
+batched_transform_points = jit(vmap(transform_points, in_axes=(1,0,0), out_axes=1))
+
+def integrate(f, points, weights):
+  # [degree^2, ...]
+  gs = f(points)
+  ws_shape = [gs.shape[0]] + [1]*(gs.ndim-1)
+  return np.sum(gs * weights.reshape(ws_shape), axis=0)/np.pi
 
 def gauss_hermite_points_and_weights(locs, scales, degree=5):
   n = locs.shape[0]
@@ -93,12 +126,6 @@ def mc_integrator(f, loc, cov, num_samples):
   f = jax.vmap(f, in_axes=0)
   sample_est = np.mean(f(xs), axis=0)
   return sample_est
-
-def integrate(f, points, weights):
-  # [degree^2, ...]
-  gs = f(points)
-  ws_shape = [gs.shape[0]] + [1]*(gs.ndim-1)
-  return np.sum(gs * weights.reshape(ws_shape), axis=0)/np.pi
 
 def ghq_2d_separable(f, locs=None, Ls=None, pts_and_weights=None, degree=5):
   """Computes an estimate of E[f(x)] using Gauss-Hermite quadrature.

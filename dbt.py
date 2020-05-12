@@ -24,7 +24,10 @@ from tb_logging import TensorboardLogger
 from plot import plot_objective_and_iterates, plot_truth_and_posterior, plot_posterior
 
 parser = argparse.ArgumentParser()
-parser.add_argument('--num_points', type=int, default=5, 
+parser.add_argument('--algo', type=str, default="laplace",
+                    choices=["laplace", "mf"],
+                    help='Algorithm to run.')
+parser.add_argument('--num_points', type=int, default=5,
                     help='Number of points in sample problem.')
 parser.add_argument('--censorship_temp', type=float, default=1.,
                     help='Censorship temperature.')
@@ -81,6 +84,7 @@ def log_joint(X, C, D,
   log_p_D = np.sum(distance_logprobs*(1-C))
   return prior + log_p_S + log_p_D
 
+
 def sample(N,
            prior='uniform',
            prior_var=1.,
@@ -134,15 +138,6 @@ def dbt_laplace(num_points, C, D, opt_method,
   Ls = np.array([np.eye(2)]*num_points)
   covs = np.array([np.eye(2)]*num_points)
 
-  # set up function, grad, and hessian
-  def lj(x, i, cond_x):
-    real_x = np.concatenate((cond_x[:i], x[np.newaxis,:], cond_x[i:]))
-    return -log_joint(real_x, C, D, 
-                     prior_var=prior_var, 
-                     censorship_temp=censorship_temp, 
-                     distance_threshold=distance_threshold, 
-                     distance_var=distance_var)
-
   def elbo(X, q_locs, q_scales):
     log_p = log_joint(X, C, D,
             prior_var=prior_var,
@@ -151,6 +146,15 @@ def dbt_laplace(num_points, C, D, opt_method,
             distance_var=distance_var)
     log_q = util.batched_mv_normal_logpdf(X, q_locs, q_scales)
     return log_p - np.sum(log_q)
+
+  # set up function, grad, and hessian
+  def lj(x, i, cond_x):
+    real_x = np.concatenate((cond_x[:i], x[np.newaxis,:], cond_x[i:]))
+    return -log_joint(real_x, C, D,
+                      prior_var=prior_var,
+                      censorship_temp=censorship_temp,
+                      distance_threshold=distance_threshold,
+                      distance_var=distance_var)
 
   batched_lj = jit(vmap(lj, in_axes=(None, None, 0)), static_argnums=(1,2))
 
@@ -193,7 +197,7 @@ def dbt_laplace(num_points, C, D, opt_method,
         return quadrature.integrate(lambda cond_x: batched_hess_lj(x, i, cond_x), pts, weights)
 
       xs = opt_method(expected_lj, expected_grad_lj, expected_hess_lj, mus[i])
-                
+
       # update mu and Sigma
       if np.any(np.isnan(xs[-1])):
         print("  New X is nan, discarding")
@@ -213,10 +217,109 @@ def dbt_laplace(num_points, C, D, opt_method,
 
       if plot and logger is not None:
         logger.log_images("objective/%d" % i,
-                plot_objective_and_iterates(mus, xs, C, i, lambda x:-expected_lj(x)),
+                plot_objective_and_iterates(mus, xs, C, i, objective=lambda x:-expected_lj(x)),
                 t)
 
       mus = new_mus
+
+  return mus, Ls
+
+def dbt_mf(num_points, C, D, opt_method,
+        init_mus=None,
+        prior_var=1.,
+        censorship_temp=10,
+        distance_threshold=.5,
+        distance_var=0.1,
+        num_outer_steps=100,
+        lr=0.05,
+        logger=None,
+        plot=False):
+  # initialize q parameters
+  if init_mus is None:
+    mus = onp.random.normal(size=(num_points,2)).astype(onp.float32)
+  log_diag = np.zeros((num_points,2), dtype=np.float32)
+  off_diag = np.zeros((num_points,1), dtype=np.float32)
+  params = np.concatenate([mus, log_diag, off_diag], axis=1)
+
+  std_pts_and_wts = quadrature.std_ghq_2d_separable(num_points-1)
+  std_pts_and_wts_1d = quadrature.std_ghq_2d_separable(1)
+  std_pts_and_wts_1d = (std_pts_and_wts_1d[0].squeeze(), std_pts_and_wts_1d[1])
+
+  def unpack_params(params):
+    params = params.reshape((-1, params.shape[-1]))
+    locs = params[...,0:2]
+    diag = np.exp(params[...,2:4])
+    off_diag = params[...,4]
+    Ls = np.stack([diag[...,0], np.zeros_like(off_diag), off_diag, diag[...,1]], axis=1)
+    return locs, Ls.reshape((-1,2,2))
+
+  def lj(xi, i, other_x):
+    real_x = np.concatenate((other_x[:i], xi[np.newaxis,:], other_x[i:]), axis=0)
+    return log_joint(real_x, C, D,
+                     prior_var=prior_var,
+                     censorship_temp=censorship_temp,
+                     distance_threshold=distance_threshold,
+                     distance_var=distance_var)
+
+  batched_lj = jit(vmap(lj, in_axes=(None, None, 0)), static_argnums=(1,2))
+
+  def kl(q_i_params, i, q_not_i_params):
+    loc_i, L_i = unpack_params(q_i_params)
+    loc_i = loc_i.squeeze(0)
+    L_i = L_i.squeeze(0)
+    cov_i = np.dot(L_i, L_i.T)
+    loc_not_i, L_not_i = unpack_params(q_not_i_params)
+
+    # Set up mapping from [degree^2, num_points-1, 2] random Gaussian noise to
+    # [degree^2] samples from num_points-1 different 2d Gaussians.
+    q_not_i_map = lambda pts: quadrature.batched_transform_points(pts, loc_not_i, L_not_i)
+    # [degree^2, 2] -> [degree^2 , 2]
+    q_i_map = lambda pts: quadrature.transform_points(pts, loc_i, L_i)
+
+    batched_lj_reparam = jit(lambda xi, i, eps: batched_lj(xi, i, q_not_i_map(eps)),
+            static_argnums=1)
+
+    def log_target(xi):
+      return quadrature.integrate_std(
+              lambda eps: batched_lj_reparam(xi, i, eps),
+              std_pts_and_wts)
+
+    batch_log_target = vmap(log_target)
+    batch_log_target_reparam = jit(lambda eps: batch_log_target(q_i_map(eps)))
+    return (util.jax_mv_normal_entropy(cov_i)
+            - quadrature.integrate_std(batch_log_target_reparam, std_pts_and_wts_1d))
+
+  grad_kl = jit(grad(kl, argnums=0), static_argnums=(1,2))
+
+  for t in range(num_outer_steps):
+    print('Global step %d' % (t+1))
+    if plot and logger is not None:
+      mus, Ls = unpack_params(params)
+      covs = np.matmul(Ls, Ls.transpose(axes=(0,2,1)))
+      logger.log_images("truth_vs_posterior_mean", plot_truth_and_posterior(X, mus, C, covs), t)
+
+    for i in range(num_points):
+      print('  Inner step %d' % (i+1))
+      cur_qi_params = params[i]
+      cur_qnoti_params = np.concatenate([params[:i], params[i+1:]], axis=0)
+      kl_step = jit(lambda p: kl(p, i, cur_qnoti_params))
+      grad_kl_step = jit(lambda p: grad_kl(p, i, cur_qnoti_params))
+
+      new_params = opt_method(kl_step, grad_kl_step, lambda x: 0., cur_qi_params)
+
+      # update mu and Sigma
+      if np.any(np.isnan(new_params[-1])):
+        print("  New X is nan, discarding")
+        print(new_params)
+      else:
+        params = np.concatenate([params[:i], new_params[np.newaxis,-1], params[i+1:,:]], axis=0)
+
+      if plot and logger is not None:
+        logger.log_images("objective/%d" % i,
+                plot_objective_and_iterates(params[:,0:2], new_params[:,0:2], C, i),
+                t)
+
+
 
   return mus, Ls
 
@@ -230,12 +333,17 @@ X, C, D = sample(args.num_points,
 
 logger = TensorboardLogger(args.logdir)
 
-dbt_laplace(args.num_points, C, D,
-            opt_method=opt.get_opt_method(args.opt_method, args.num_inner_opt_steps, lr=args.lr),
-            censorship_temp=args.censorship_temp,
-            distance_var=args.distance_variance,
-            distance_threshold=args.distance_threshold,
-            num_outer_steps=args.num_steps,
-            lr=args.lr,
-            logger=logger,
-            plot=args.make_plots)
+if args.algo == "laplace":
+  algo = dbt_laplace
+else:
+  algo = dbt_mf
+
+algo(args.num_points, C, D,
+     opt_method=opt.get_opt_method(args.opt_method, args.num_inner_opt_steps, lr=args.lr),
+     censorship_temp=args.censorship_temp,
+     distance_var=args.distance_variance,
+     distance_threshold=args.distance_threshold,
+     num_outer_steps=args.num_steps,
+     lr=args.lr,
+     logger=logger,
+     plot=args.make_plots)

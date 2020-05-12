@@ -26,26 +26,29 @@ def window_for_points(Xs):
   return xbounds, ybounds
 
 
-def plot_objective_and_iterates(Xs, iterates, C, k, objective, num_pts=100):
+def plot_objective_and_iterates(Xs, iterates, C, k, objective=None, num_pts=100):
 
   num_points = Xs.shape[0]
   has_nan_iterates = np.any(np.isnan(iterates))
   it_inds = np.logical_not(np.any(np.isnan(iterates), axis=1))
   iterates = iterates[it_inds,:]
 
-  objective = jax.vmap(objective)
   all_Xs = np.concatenate([Xs, iterates], axis=0)
   xbounds, ybounds = window_for_points(all_Xs)
 
-  x = np.arange(xbounds[0], stop=xbounds[1], step=(xbounds[1]-xbounds[0])/float(num_pts))[:num_pts]
-  y = np.arange(ybounds[0], stop=ybounds[1], step=(ybounds[1]-ybounds[0])/float(num_pts))[:num_pts]
+  if objective is not None:
+    x = np.arange(xbounds[0], stop=xbounds[1], step=(xbounds[1]-xbounds[0])/float(num_pts))[:num_pts]
+    y = np.arange(ybounds[0], stop=ybounds[1], step=(ybounds[1]-ybounds[0])/float(num_pts))[:num_pts]
 
-  X, Y = np.meshgrid(x, y)
-  XY = np.reshape(np.stack([X,Y], axis=-1), [num_pts**2, 2])
-  density = np.reshape(objective(XY), [num_pts, num_pts])
+    X, Y = np.meshgrid(x, y)
+    XY = np.reshape(np.stack([X,Y], axis=-1), [num_pts**2, 2])
+    objective = jax.vmap(objective)
+    density = np.reshape(objective(XY), [num_pts, num_pts])
 
-  if np.any(np.isnan(density)) or np.any(np.isinf(density)):
-    print("Density plot has nans")
+    if np.any(np.isnan(density)) or np.any(np.isinf(density)):
+      print("Density plot has nans")
+  else:
+    density = np.zeros([num_pts, num_pts])
 
   fig = plt.figure()
   canvas = FigureCanvas(fig)

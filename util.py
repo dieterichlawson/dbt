@@ -87,3 +87,12 @@ def jax_mv_normal_logpdf(X, loc, L):
   return -0.5 * (dim * np.log(2 * np.pi) + log_det + maha)
 
 batched_mv_normal_logpdf = jax.jit(jax.vmap(jax_mv_normal_logpdf, in_axes=0))
+
+def jax_mv_normal_entropy(cov):
+  k = cov.shape[0]
+  eigvals = np.linalg.eigvalsh(cov)
+  eps = 1e-5*np.max(abs(eigvals))
+  mask = np.greater(abs(eigvals)-eps, 0.)
+  log_nonzero_eigvals = np.where(mask, np.log(eigvals), np.zeros_like(eigvals))
+  log_det = np.sum(log_nonzero_eigvals)
+  return k/2. + (k/2.)*np.log(2*np.pi) + .5*log_det
