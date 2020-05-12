@@ -286,7 +286,7 @@ def dbt_mf(num_points, C, D, opt_method,
 
     batch_log_target = vmap(log_target)
     batch_log_target_reparam = jit(lambda eps: batch_log_target(q_i_map(eps)))
-    return (util.jax_mv_normal_entropy(cov_i)
+    return (-util.jax_mv_normal_entropy(cov_i)
             - quadrature.integrate_std(batch_log_target_reparam, std_pts_and_wts_1d))
 
   grad_kl = jit(grad(kl, argnums=0), static_argnums=(1,2))
