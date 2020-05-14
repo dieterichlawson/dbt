@@ -76,13 +76,13 @@ def log_joint(X, C, D,
   Returns:
     log_p: The log probability of the provided observations.
   """
-  prior = np.sum(scipy.stats.multivariate_normal.logpdf(X, mean=np.array([0.,0.]), cov=prior_var))
+  prior = np.sum(scipy.stats.norm.logpdf(X, loc=0., scale=np.sqrt(prior_var)))
   distances = util.jax_l2_pdist(X)
   censorship_probs = scipy.special.expit(censorship_temp*(distances - distance_threshold))
-  log_p_S = np.sum(util.jax_bernoulli_logpmf(C, censorship_probs))
+  log_p_C = np.sum(scipy.stats.bernoulli.logpmf(C, censorship_probs))
   distance_logprobs = scipy.stats.norm.logpdf(D, loc=distances, scale=np.sqrt(distance_var))
   log_p_D = np.sum(distance_logprobs*(1-C))
-  return prior + log_p_S + log_p_D
+  return prior + log_p_C + log_p_D
 
 
 def sample(N,

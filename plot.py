@@ -110,7 +110,7 @@ def plot_posterior(Xs, i, C, L, num_pts=100):
   X, Y = np.meshgrid(x, y)
   XY = np.reshape(np.stack([X,Y], axis=-1), [num_pts**2, 2])
 
-  log_density = jax.vmap(lambda x: util.jax_mv_normal_logpdf(x, Xs[i], L))
+  log_density = jax.vmap(lambda x: util.mv_normal_logpdf(x, Xs[i], L))
   log_density_im = np.reshape(log_density(XY), [num_pts, num_pts])
   density_im = np.exp(log_density_im)
 
@@ -183,7 +183,7 @@ def plot_truth_and_posterior(gt_Xs, post_Xs, C, covs, num_pts=100):
   X, Y = np.meshgrid(x, y)
   XY = np.reshape(np.stack([X,Y], axis=-1), [num_pts**2, 2])
 
-  #batched_log_density = jax.jit(jax.vmap(util.jax_mv_normal_logpdf, in_axes=(None, 0, 0)))
+  #batched_log_density = jax.jit(jax.vmap(util.mv_normal_logpdf, in_axes=(None, 0, 0)))
   #sum_density = lambda x: jnp.exp(jscipy.special.logsumexp(batched_log_density(x, post_Xs, Ls)))
   #batched_sum_density = jax.jit(jax.vmap(sum_density, in_axes=0))
   #density = np.reshape(batched_sum_density(XY), [num_pts, num_pts])
