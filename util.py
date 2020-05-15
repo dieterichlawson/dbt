@@ -71,3 +71,12 @@ def jax_mv_normal_entropy(cov):
   log_nonzero_eigvals = np.where(mask, np.log(eigvals), np.zeros_like(eigvals))
   log_det = np.sum(log_nonzero_eigvals)
   return k/2. + (k/2.)*np.log(2*np.pi) + .5*log_det
+
+def insert(m, r, i):
+  n = m.shape[0]
+  a = np.concatenate([m, r[np.newaxis,:]], axis=0)
+  before_inds = np.arange(n+1)*np.less(np.arange(n+1),i)
+  after_inds = (np.arange(n+1)-1)*np.greater(np.arange(n+1),i)
+  new_ind = np.ones(shape=[n+1], dtype=np.int32)*np.equal(np.arange(n+1),i)*n
+  inds = before_inds + after_inds + new_ind
+  return a[inds]

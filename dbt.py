@@ -277,7 +277,7 @@ def dbt_mf(num_points, C, D, opt_method,
   std_pts_and_wts_1d = (std_pts_and_wts_1d[0].squeeze(), std_pts_and_wts_1d[1])
   
   def lj(xi, i, other_x):
-    real_x = np.concatenate((other_x[:i], xi[np.newaxis,:], other_x[i:]), axis=0)
+    real_x = util.insert(other_x, xi, i)
     return log_joint(real_x, C, D,
                      prior_var=prior_var,
                      censorship_temp=censorship_temp,
@@ -319,7 +319,7 @@ def dbt_mf(num_points, C, D, opt_method,
                       lambda x: 0.,
                       q_i_params)
 
-  inner_opt = jit(inner_opt, static_argnums=1)
+  inner_opt = jit(inner_opt)
 
   for t in range(num_outer_steps):
     print('Global step %d' % (t+1))
