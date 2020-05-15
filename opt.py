@@ -53,6 +53,24 @@ def adam(f, grad_f, init_x, lr, num_steps=25, beta_1=0.9, beta_2=0.999, epsilon=
     xs.append(x)
   return np.array(xs)
 
+def adam2(f, grad_f, init_x, lr, num_steps=25, beta_1=0.9, beta_2=0.999, epsilon=1e-8):
+
+  def for_body(i, state):
+    x, first_moment, second_moment = state
+    g = grad_f(x)
+    first_moment = beta_1*first_moment + (1 - beta_1)*g
+    second_moment = beta_2*second_moment + (1-beta_2)*(g**2)
+    true_first_moment = first_moment/(1. - np.power(beta_1, i+1))
+    true_second_moment = second_moment/(1. - np.power(beta_2, i+1))
+    x = x - lr*true_first_moment/(np.sqrt(true_second_moment) + epsilon)
+    return (x, first_moment, second_moment)
+
+  for_body = jit(for_body)
+
+  first_moment = np.zeros_like(init_x)
+  second_moment = np.zeros_like(init_x)
+  return jax.lax.fori_loop(0, num_steps, for_body, (init_x, first_moment, second_moment))[0]
+
 NEWTONS_METHOD="newtons"
 GRADIENT_DESCENT="grad_descent"
 GRADIENT_DESCENT_WITH_MOMENTUM="grad_descent_momentum"
@@ -63,7 +81,7 @@ OPT_METHODS = [NEWTONS_METHOD, GRADIENT_DESCENT, GRADIENT_DESCENT_WITH_MOMENTUM,
 OPT_FNS = {NEWTONS_METHOD: newtons_method,
            GRADIENT_DESCENT: gradient_descent,
            GRADIENT_DESCENT_WITH_MOMENTUM: gradient_descent_with_momentum,
-           ADAM: adam}
+           ADAM: adam2}
 
 def get_opt_method(opt_method, num_steps, lr=None):
   assert opt_method in OPT_METHODS

@@ -27,6 +27,9 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--algo', type=str, default="laplace",
                     choices=["laplace", "mf"],
                     help='Algorithm to run.')
+parser.add_argument('--problem_type', type=str, default="random",
+                    choices=["random", "lattice"],
+                    help='Whether to sample the problem randomly or use a lattice.')
 parser.add_argument('--num_points', type=int, default=5,
                     help='Number of points in sample problem.')
 parser.add_argument('--censorship_temp', type=float, default=1.,
@@ -46,12 +49,14 @@ parser.add_argument('--opt_method', type=str, default=opt.ADAM,
 parser.add_argument('--lr', type=float, default=0.1,
                     help='Learning rate to use with the optimization method.')
 
-parser.add_argument('--make_plots', type=bool, default=False,
-                    help="If true, log plots to Tensorboard (expensive).")
+parser.add_argument('--make_posterior_plots', type=bool, default=True,
+                    help="If true, log posterior plots to Tensorboard (expensive).")
+parser.add_argument('--make_optimization_plots', type=bool, default=False,
+                    help="If true, log optimization plots to Tensorboard (expensive).")
 parser.add_argument('--logdir', type=str, default='/tmp/dbt',
                     help="Logging directory for Tensorboard summaries")
 
-@partial(jit, static_argnums=(1,2))
+@jit
 def log_joint(X, C, D,
               prior_var=1.,
               censorship_temp=10,
@@ -86,7 +91,7 @@ def log_joint(X, C, D,
 
 
 def sample(N,
-           prior='uniform',
+           X=None,
            prior_var=1.,
            censorship_temp=10,
            distance_threshold=.5,
@@ -110,16 +115,33 @@ def sample(N,
     D: The pairwise distance matrix, flattened. Distances that were censored
       are 0.
   """
-  if prior == "gaussian":
+  if X is None:
     X = onp.random.multivariate_normal(mean=[0.,0.], cov=prior_var*np.identity(2), size=[N])
-  elif prior == "uniform":
-    X = onp.random.uniform(low=-1., high=1., size=[N,2])
   distances = oscipy.spatial.distance.pdist(X)
   censorship_probs = oscipy.special.expit(censorship_temp*(distances - distance_threshold))
   C = onp.random.binomial(1, censorship_probs)
   uncensored_D = onp.random.normal(loc=distances, scale=onp.sqrt(distance_var))
   D = uncensored_D*(1-C)
   return X, C, D
+
+
+def lattice(size=10, lims=(-1,1)):
+  ticks = onp.linspace(lims[0], lims[1], num=size)
+  Xs, Ys = onp.meshgrid(ticks, ticks)
+  X = onp.reshape(onp.stack([Xs, Ys], axis=-1),[-1,2])
+  num_points = X.shape[0]
+
+  true_D = oscipy.spatial.distance.pdist(X)
+
+  C = []
+  for i in range(int(num_points*(num_points-1)/2)):
+    m, n = util.flat_to_rc(i, num_points)
+    if (n % size != 0 and (m == (n + 1) or m == (n-1))) or (m == (n + size) or m == (n - size)):
+      C.append(0)
+    else:
+      C.append(1)
+  C = onp.array(C)
+  return X, C, true_D*(1-C)
 
 def dbt_laplace(num_points, C, D, opt_method,
                 init_mus=None,
@@ -156,13 +178,13 @@ def dbt_laplace(num_points, C, D, opt_method,
                       distance_threshold=distance_threshold,
                       distance_var=distance_var)
 
-  batched_lj = jit(vmap(lj, in_axes=(None, None, 0)), static_argnums=(1,2))
+  batched_lj = jit(vmap(lj, in_axes=(None, None, 0)), static_argnums=1)
 
   grad_lj = jax.grad(lj, argnums=0)
-  batched_grad_lj = jit(vmap(grad_lj, in_axes=(None, None, 0)), static_argnums=(1,2))
+  batched_grad_lj = jit(vmap(grad_lj, in_axes=(None, None, 0)), static_argnums=1)
 
   hess_lj = jax.jacfwd(grad_lj, argnums=0)
-  batched_hess_lj = jit(vmap(hess_lj, in_axes=(None, None, 0)), static_argnums=(1,2))
+  batched_hess_lj = jit(vmap(hess_lj, in_axes=(None, None, 0)), static_argnums=1)
 
   for t in range(num_outer_steps):
 
@@ -225,15 +247,14 @@ def dbt_laplace(num_points, C, D, opt_method,
   return mus, Ls
 
 def dbt_mf(num_points, C, D, opt_method,
-        init_mus=None,
-        prior_var=1.,
-        censorship_temp=10,
-        distance_threshold=.5,
-        distance_var=0.1,
-        num_outer_steps=100,
-        lr=0.05,
-        logger=None,
-        plot=False):
+           init_mus=None,
+           prior_var=1.,
+           censorship_temp=10,
+           distance_threshold=.5,
+           distance_var=0.1,
+           num_outer_steps=100,
+           lr=0.05,
+           logger=None):
   # initialize q parameters
   if init_mus is None:
     mus = onp.random.normal(size=(num_points,2)).astype(onp.float32)
@@ -241,10 +262,7 @@ def dbt_mf(num_points, C, D, opt_method,
   off_diag = np.zeros((num_points,1), dtype=np.float32)
   params = np.concatenate([mus, log_diag, off_diag], axis=1)
 
-  std_pts_and_wts = quadrature.std_ghq_2d_separable(num_points-1)
-  std_pts_and_wts_1d = quadrature.std_ghq_2d_separable(1)
-  std_pts_and_wts_1d = (std_pts_and_wts_1d[0].squeeze(), std_pts_and_wts_1d[1])
-
+  # function to unpack the collapsed parameters into usable arrays
   def unpack_params(params):
     params = params.reshape((-1, params.shape[-1]))
     locs = params[...,0:2]
@@ -253,6 +271,11 @@ def dbt_mf(num_points, C, D, opt_method,
     Ls = np.stack([diag[...,0], np.zeros_like(off_diag), off_diag, diag[...,1]], axis=1)
     return locs, Ls.reshape((-1,2,2))
 
+  # Make quadrature points and weights
+  std_pts_and_wts = quadrature.std_ghq_2d_separable(num_points-1)
+  std_pts_and_wts_1d = quadrature.std_ghq_2d_separable(1)
+  std_pts_and_wts_1d = (std_pts_and_wts_1d[0].squeeze(), std_pts_and_wts_1d[1])
+  
   def lj(xi, i, other_x):
     real_x = np.concatenate((other_x[:i], xi[np.newaxis,:], other_x[i:]), axis=0)
     return log_joint(real_x, C, D,
@@ -261,7 +284,7 @@ def dbt_mf(num_points, C, D, opt_method,
                      distance_threshold=distance_threshold,
                      distance_var=distance_var)
 
-  batched_lj = jit(vmap(lj, in_axes=(None, None, 0)), static_argnums=(1,2))
+  batched_lj = vmap(lj, in_axes=(None, None, 0))
 
   def kl(q_i_params, i, q_not_i_params):
     loc_i, L_i = unpack_params(q_i_params)
@@ -276,8 +299,7 @@ def dbt_mf(num_points, C, D, opt_method,
     # [degree^2, 2] -> [degree^2 , 2]
     q_i_map = lambda pts: quadrature.transform_points(pts, loc_i, L_i)
 
-    batched_lj_reparam = jit(lambda xi, i, eps: batched_lj(xi, i, q_not_i_map(eps)),
-            static_argnums=1)
+    batched_lj_reparam = lambda xi, i, eps: batched_lj(xi, i, q_not_i_map(eps))
 
     def log_target(xi):
       return quadrature.integrate_std(
@@ -285,51 +307,58 @@ def dbt_mf(num_points, C, D, opt_method,
               std_pts_and_wts)
 
     batch_log_target = vmap(log_target)
-    batch_log_target_reparam = jit(lambda eps: batch_log_target(q_i_map(eps)))
+    batch_log_target_reparam = lambda eps: batch_log_target(q_i_map(eps))
     return (-util.jax_mv_normal_entropy(cov_i)
             - quadrature.integrate_std(batch_log_target_reparam, std_pts_and_wts_1d))
 
-  grad_kl = jit(grad(kl, argnums=0), static_argnums=(1,2))
+  grad_kl = grad(kl, argnums=0)
+
+  def inner_opt(q_i_params, i, q_not_i_params):
+    return opt_method(lambda x: kl(x, i, q_not_i_params),
+                      lambda x: grad_kl(x, i, q_not_i_params),
+                      lambda x: 0.,
+                      q_i_params)
+
+  inner_opt = jit(inner_opt, static_argnums=1)
 
   for t in range(num_outer_steps):
     print('Global step %d' % (t+1))
-    if plot and logger is not None:
+    if args.make_posterior_plots and logger is not None:
       mus, Ls = unpack_params(params)
       covs = np.matmul(Ls, Ls.transpose(axes=(0,2,1)))
       logger.log_images("truth_vs_posterior_mean", plot_truth_and_posterior(X, mus, C, covs), t)
 
     for i in range(num_points):
       print('  Inner step %d' % (i+1))
-      cur_qi_params = params[i]
-      cur_qnoti_params = np.concatenate([params[:i], params[i+1:]], axis=0)
-      kl_step = jit(lambda p: kl(p, i, cur_qnoti_params))
-      grad_kl_step = jit(lambda p: grad_kl(p, i, cur_qnoti_params))
+      q_i_params = params[i]
+      q_not_i_params = np.concatenate([params[:i], params[i+1:]], axis=0)
 
-      new_params = opt_method(kl_step, grad_kl_step, lambda x: 0., cur_qi_params)
+      new_params = inner_opt(q_i_params, i, q_not_i_params)
 
       # update mu and Sigma
-      if np.any(np.isnan(new_params[-1])):
+      if np.any(np.isnan(new_params)):
         print("  New X is nan, discarding")
         print(new_params)
       else:
-        params = np.concatenate([params[:i], new_params[np.newaxis,-1], params[i+1:,:]], axis=0)
+        params = np.concatenate([params[:i], new_params[np.newaxis,:], params[i+1:,:]], axis=0)
 
-      if plot and logger is not None:
+      if args.make_optimization_plots and logger is not None:
         logger.log_images("objective/%d" % i,
                 plot_objective_and_iterates(params[:,0:2], new_params[:,0:2], C, i),
                 t)
-
-
-
   return mus, Ls
 
 args = parser.parse_args()
 
-X, C, D = sample(args.num_points,
-                 censorship_temp=args.censorship_temp,
-                 distance_var=args.distance_variance,
-                 distance_threshold=args.distance_threshold,
-                 prior='gaussian')
+if args.problem_type == "random":
+  X, C, D = sample(args.num_points,
+                   censorship_temp=args.censorship_temp,
+                   distance_var=args.distance_variance,
+                   distance_threshold=args.distance_threshold)
+else:
+  sqrt = int(np.sqrt(args.num_points))
+  assert sqrt**2 == args.num_points, "num_points must be a square to use lattice."
+  X, C, D = lattice(int(np.sqrt(args.num_points)))
 
 logger = TensorboardLogger(args.logdir)
 
@@ -345,5 +374,4 @@ algo(args.num_points, C, D,
      distance_threshold=args.distance_threshold,
      num_outer_steps=args.num_steps,
      lr=args.lr,
-     logger=logger,
-     plot=args.make_plots)
+     logger=logger)
