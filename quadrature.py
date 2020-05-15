@@ -22,10 +22,8 @@ def std_ghq_2d_separable(n, degree=5):
   # [degree^2, n, 2]
   xs_nd = onp.stack([xs_2d]*n, axis=1)
   # [degree^2]
-  ws_2d = onp.prod(onp.array(list(itertools.product(ws_1d, ws_1d))), axis=1)
-  # [degree^2]
-  ws_nd = ws_2d / np.power(np.pi, (3/2.))
-  return xs_nd, ws_nd
+  ws = onp.prod(onp.array(list(itertools.product(ws_1d, ws_1d))), axis=1) / np.pi
+  return xs_nd, ws
 
 def integrate_std(f, points_and_weights):
   points, weights = points_and_weights
@@ -35,10 +33,10 @@ def integrate_std(f, points_and_weights):
   return np.sum(gs * weights.reshape(ws_shape), axis=0)
 
 @partial(jit)
-def transform_points(pts, loc, L):
-  return np.matmul(L[np.newaxis,...], pts[...,np.newaxis]).squeeze(-1) + loc[np.newaxis,:]
+def transform_points(pts, locs, Ls):
+  return np.sqrt(2)*np.matmul(Ls, pts[..., np.newaxis]).squeeze(-1) + locs
 
-batched_transform_points = jit(vmap(transform_points, in_axes=(1,0,0), out_axes=1))
+batched_transform_points = jit(vmap(transform_points, in_axes=(0, None, None)))
 
 def integrate(f, points, weights):
   # [degree^2, ...]
