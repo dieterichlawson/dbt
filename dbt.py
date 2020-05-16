@@ -313,13 +313,19 @@ def dbt_mf(num_points, C, D, opt_method,
 
   grad_kl = grad(kl, argnums=0)
 
-  def inner_opt(q_i_params, i, q_not_i_params):
-    return opt_method(lambda x: kl(x, i, q_not_i_params),
-                      lambda x: grad_kl(x, i, q_not_i_params),
-                      lambda x: 0.,
-                      q_i_params)
+  def inner_step_body(i, params):
+    q_i_params = params[i]
+    q_not_i_params = util.delete(params, i)
+    new_params = opt_method(lambda x: kl(x, i, q_not_i_params),
+                            lambda x: grad_kl(x, i, q_not_i_params),
+                            lambda x: 0.,
+                            q_i_params)
+    return jax.ops.index_update(params, i, new_params)
 
-  inner_opt = jit(inner_opt)
+  def inner_step(params):
+    return jax.lax.fori_loop(0, num_points, inner_step_body, params)
+
+  inner_step = jit(inner_step)
 
   for t in range(num_outer_steps):
     print('Global step %d' % (t+1))
@@ -328,24 +334,9 @@ def dbt_mf(num_points, C, D, opt_method,
       covs = np.matmul(Ls, Ls.transpose(axes=(0,2,1)))
       logger.log_images("truth_vs_posterior_mean", plot_truth_and_posterior(X, mus, C, covs), t)
 
-    for i in range(num_points):
-      print('  Inner step %d' % (i+1))
-      q_i_params = params[i]
-      q_not_i_params = np.concatenate([params[:i], params[i+1:]], axis=0)
+    params = inner_step(params)
 
-      new_params = inner_opt(q_i_params, i, q_not_i_params)
 
-      # update mu and Sigma
-      if np.any(np.isnan(new_params)):
-        print("  New X is nan, discarding")
-        print(new_params)
-      else:
-        params = np.concatenate([params[:i], new_params[np.newaxis,:], params[i+1:,:]], axis=0)
-
-      if args.make_optimization_plots and logger is not None:
-        logger.log_images("objective/%d" % i,
-                plot_objective_and_iterates(params[:,0:2], new_params[:,0:2], C, i),
-                t)
   return mus, Ls
 
 args = parser.parse_args()

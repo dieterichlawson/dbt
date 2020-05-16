@@ -80,3 +80,10 @@ def insert(m, r, i):
   new_ind = np.ones(shape=[n+1], dtype=np.int32)*np.equal(np.arange(n+1),i)*n
   inds = before_inds + after_inds + new_ind
   return a[inds]
+
+def delete(m, i):
+  n = m.shape[0]
+  before_inds = np.arange(n-1)*np.less(np.arange(n-1),i)
+  after_inds = (np.arange(n-1)+1)*np.greater(np.arange(n-1)+1,i)
+  inds = before_inds + after_inds
+  return m[inds]
